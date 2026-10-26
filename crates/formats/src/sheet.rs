@@ -292,6 +292,18 @@ fn walk(xml: &[u8], mut f: impl FnMut(Ev<'_>)) -> bool {
                     root_closed = true;
                 }
             }
+            // Character data outside the root is malformed XML unless it is whitespace; a
+            // CDATA section cannot appear there at all.
+            Ok(Event::Text(t)) if depth == 0 => {
+                if t.decode().map(|c| c.chars().any(|ch| !ch.is_whitespace())).unwrap_or(true) {
+                    return false;
+                }
+            }
+            Ok(Event::CData(t)) if depth == 0 => {
+                if t.iter().any(|b| !b.is_ascii_whitespace()) {
+                    return false;
+                }
+            }
             Ok(Event::Text(t)) if depth <= MAX_XML_DEPTH => f(Ev::Text(t.decode().map(|c| c.into_owned()).unwrap_or_default())),
             Ok(Event::CData(t)) if depth <= MAX_XML_DEPTH => f(Ev::Text(String::from_utf8_lossy(&t).into_owned())),
             Ok(Event::GeneralRef(g)) if depth <= MAX_XML_DEPTH => {
@@ -1238,6 +1250,21 @@ mod tests {
         let sheet = r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Ada</t></is></c></row></sheetData></worksheet><worksheet><sheetData/></worksheet>"#;
         let err = read_rows(&xlsx(sheet), Pick::Index(0)).unwrap_err();
         assert!(err.contains("not well-formed"), "{err}");
+    }
+
+    #[test]
+    fn text_outside_the_root_is_rejected() {
+        // Only whitespace may follow the document element; other character data is malformed.
+        let ods = r#"<office:document-content xmlns:office="o" xmlns:table="t" xmlns:text="x"><office:body><office:spreadsheet><table:table table:name="S"><table:table-row><table:table-cell office:value-type="string"><text:p>Ada</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#;
+        let book = |content: &str| zip(&[("mimetype", "application/vnd.oasis.opendocument.spreadsheet"), ("content.xml", content)]);
+        let err = read_rows(&book(&format!("{ods}garbage")), Pick::Index(0)).unwrap_err();
+        assert!(err.contains("not well-formed"), "{err}");
+        assert!(read_rows(&book(&format!("{ods}\n\t ")), Pick::Index(0)).is_ok());
+
+        let sheet = r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Ada</t></is></c></row></sheetData></worksheet>"#;
+        let err = read_rows(&xlsx(&format!("{sheet}garbage")), Pick::Index(0)).unwrap_err();
+        assert!(err.contains("not well-formed"), "{err}");
+        assert!(read_rows(&xlsx(&format!("{sheet}\n\t ")), Pick::Index(0)).is_ok());
     }
 
     #[test]

@@ -1194,6 +1194,18 @@ fn events(xml: &[u8], mut f: impl FnMut(Ev)) -> bool {
                     root_closed = true;
                 }
             }
+            // Character data outside the root is malformed XML unless it is whitespace; a
+            // CDATA section cannot appear there at all.
+            Ok(Event::Text(t)) if depth == 0 => {
+                if t.decode().map(|c| c.chars().any(|ch| !ch.is_whitespace())).unwrap_or(true) {
+                    return false;
+                }
+            }
+            Ok(Event::CData(t)) if depth == 0 => {
+                if t.iter().any(|b| !b.is_ascii_whitespace()) {
+                    return false;
+                }
+            }
             Ok(Event::Text(t)) => f(Ev::Text(t.decode().map(|c| c.into_owned()).unwrap_or_default())),
             Ok(Event::CData(t)) => f(Ev::Text(String::from_utf8_lossy(&t).into_owned())),
             Ok(Event::GeneralRef(r)) => {
@@ -3239,6 +3251,17 @@ mod tests {
         );
         let err = import(&package(&content, None)).unwrap_err();
         assert!(err.contains("not well-formed"), "{err}");
+    }
+
+    #[test]
+    fn text_outside_the_root_is_rejected() {
+        // Only whitespace may follow the document element; other character data is malformed.
+        let content = format!(
+            r#"<office:document-content {NS_T}><office:body><office:text><text:p>Good</text:p></office:text></office:body></office:document-content>"#
+        );
+        let err = import(&package(&format!("{content}garbage"), None)).unwrap_err();
+        assert!(err.contains("not well-formed"), "{err}");
+        assert!(import(&package(&format!("{content}\n\t "), None)).is_ok());
     }
 
     #[test]
