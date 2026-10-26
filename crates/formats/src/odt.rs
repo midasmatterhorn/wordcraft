@@ -1194,18 +1194,16 @@ fn events(xml: &[u8], mut f: impl FnMut(Ev)) -> bool {
                     root_closed = true;
                 }
             }
-            // Character data outside the root is malformed XML unless it is whitespace; a
-            // CDATA section cannot appear there at all.
+            // Outside the document element only XML's four whitespace characters may appear
+            // (syntax: S = #x20 | #x9 | #xD | #xA); CDATA sections and entity references are
+            // not allowed there at all.
             Ok(Event::Text(t)) if depth == 0 => {
-                if t.decode().map(|c| c.chars().any(|ch| !ch.is_whitespace())).unwrap_or(true) {
+                if t.decode().map(|c| c.chars().any(|ch| !matches!(ch, ' ' | '\t' | '\r' | '\n'))).unwrap_or(true) {
                     return false;
                 }
             }
-            Ok(Event::CData(t)) if depth == 0 => {
-                if t.iter().any(|b| !b.is_ascii_whitespace()) {
-                    return false;
-                }
-            }
+            Ok(Event::CData(_)) if depth == 0 => return false,
+            Ok(Event::GeneralRef(_)) if depth == 0 => return false,
             Ok(Event::Text(t)) => f(Ev::Text(t.decode().map(|c| c.into_owned()).unwrap_or_default())),
             Ok(Event::CData(t)) => f(Ev::Text(String::from_utf8_lossy(&t).into_owned())),
             Ok(Event::GeneralRef(r)) => {
@@ -3259,9 +3257,11 @@ mod tests {
         let content = format!(
             r#"<office:document-content {NS_T}><office:body><office:text><text:p>Good</text:p></office:text></office:body></office:document-content>"#
         );
-        let err = import(&package(&format!("{content}garbage"), None)).unwrap_err();
-        assert!(err.contains("not well-formed"), "{err}");
-        assert!(import(&package(&format!("{content}\n\t "), None)).is_ok());
+        for trailing in ["garbage", "<![CDATA[ ]]>", "&amp;", "\u{a0}"] {
+            let err = import(&package(&format!("{content}{trailing}"), None)).unwrap_err();
+            assert!(err.contains("not well-formed"), "{trailing}: {err}");
+        }
+        assert!(import(&package(&format!("{content}\r\n\t "), None)).is_ok());
     }
 
     #[test]

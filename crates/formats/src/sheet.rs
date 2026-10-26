@@ -292,18 +292,16 @@ fn walk(xml: &[u8], mut f: impl FnMut(Ev<'_>)) -> bool {
                     root_closed = true;
                 }
             }
-            // Character data outside the root is malformed XML unless it is whitespace; a
-            // CDATA section cannot appear there at all.
+            // Outside the document element only XML's four whitespace characters may appear
+            // (syntax: S = #x20 | #x9 | #xD | #xA); CDATA sections and entity references are
+            // not allowed there at all.
             Ok(Event::Text(t)) if depth == 0 => {
-                if t.decode().map(|c| c.chars().any(|ch| !ch.is_whitespace())).unwrap_or(true) {
+                if t.decode().map(|c| c.chars().any(|ch| !matches!(ch, ' ' | '\t' | '\r' | '\n'))).unwrap_or(true) {
                     return false;
                 }
             }
-            Ok(Event::CData(t)) if depth == 0 => {
-                if t.iter().any(|b| !b.is_ascii_whitespace()) {
-                    return false;
-                }
-            }
+            Ok(Event::CData(_)) if depth == 0 => return false,
+            Ok(Event::GeneralRef(_)) if depth == 0 => return false,
             Ok(Event::Text(t)) if depth <= MAX_XML_DEPTH => f(Ev::Text(t.decode().map(|c| c.into_owned()).unwrap_or_default())),
             Ok(Event::CData(t)) if depth <= MAX_XML_DEPTH => f(Ev::Text(String::from_utf8_lossy(&t).into_owned())),
             Ok(Event::GeneralRef(g)) if depth <= MAX_XML_DEPTH => {
@@ -1257,14 +1255,18 @@ mod tests {
         // Only whitespace may follow the document element; other character data is malformed.
         let ods = r#"<office:document-content xmlns:office="o" xmlns:table="t" xmlns:text="x"><office:body><office:spreadsheet><table:table table:name="S"><table:table-row><table:table-cell office:value-type="string"><text:p>Ada</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#;
         let book = |content: &str| zip(&[("mimetype", "application/vnd.oasis.opendocument.spreadsheet"), ("content.xml", content)]);
-        let err = read_rows(&book(&format!("{ods}garbage")), Pick::Index(0)).unwrap_err();
-        assert!(err.contains("not well-formed"), "{err}");
-        assert!(read_rows(&book(&format!("{ods}\n\t ")), Pick::Index(0)).is_ok());
+        for trailing in ["garbage", "<![CDATA[ ]]>", "&amp;", "\u{a0}"] {
+            let err = read_rows(&book(&format!("{ods}{trailing}")), Pick::Index(0)).unwrap_err();
+            assert!(err.contains("not well-formed"), "{trailing}: {err}");
+        }
+        assert!(read_rows(&book(&format!("{ods}\r\n\t ")), Pick::Index(0)).is_ok());
 
         let sheet = r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Ada</t></is></c></row></sheetData></worksheet>"#;
-        let err = read_rows(&xlsx(&format!("{sheet}garbage")), Pick::Index(0)).unwrap_err();
-        assert!(err.contains("not well-formed"), "{err}");
-        assert!(read_rows(&xlsx(&format!("{sheet}\n\t ")), Pick::Index(0)).is_ok());
+        for trailing in ["garbage", "<![CDATA[ ]]>", "&amp;", "\u{a0}"] {
+            let err = read_rows(&xlsx(&format!("{sheet}{trailing}")), Pick::Index(0)).unwrap_err();
+            assert!(err.contains("not well-formed"), "{trailing}: {err}");
+        }
+        assert!(read_rows(&xlsx(&format!("{sheet}\r\n\t ")), Pick::Index(0)).is_ok());
     }
 
     #[test]
