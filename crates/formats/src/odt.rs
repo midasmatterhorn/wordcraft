@@ -1164,14 +1164,25 @@ fn events(xml: &[u8], mut f: impl FnMut(Ev)) -> bool {
     cfg.allow_unmatched_ends = false;
     let mut buf = Vec::new();
     let mut depth = 0usize;
+    // `quick_xml` accepts a second top-level element; one document must have exactly one root.
+    let mut root_closed = false;
     loop {
         buf.clear();
         match r.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
+                if depth == 0 && root_closed {
+                    return false;
+                }
                 depth = depth.saturating_add(1);
                 f(Ev::Start(String::from_utf8_lossy(e.name().as_ref()).into_owned(), attrs_of(&e)));
             }
             Ok(Event::Empty(e)) => {
+                if depth == 0 {
+                    if root_closed {
+                        return false;
+                    }
+                    root_closed = true;
+                }
                 let n = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                 f(Ev::Start(n.clone(), attrs_of(&e)));
                 f(Ev::End(n));
@@ -1179,6 +1190,9 @@ fn events(xml: &[u8], mut f: impl FnMut(Ev)) -> bool {
             Ok(Event::End(e)) => {
                 depth = depth.saturating_sub(1);
                 f(Ev::End(String::from_utf8_lossy(e.name().as_ref()).into_owned()));
+                if depth == 0 {
+                    root_closed = true;
+                }
             }
             Ok(Event::Text(t)) => f(Ev::Text(t.decode().map(|c| c.into_owned()).unwrap_or_default())),
             Ok(Event::CData(t)) => f(Ev::Text(String::from_utf8_lossy(&t).into_owned())),
@@ -1194,7 +1208,7 @@ fn events(xml: &[u8], mut f: impl FnMut(Ev)) -> bool {
                 };
                 f(Ev::Text(s));
             }
-            Ok(Event::Eof) => return depth == 0,
+            Ok(Event::Eof) => return root_closed && depth == 0,
             Err(_) => return false,
             Ok(_) => {}
         }
@@ -3215,6 +3229,16 @@ mod tests {
             }
         }
         assert!(accepted.is_empty(), "malformed XML imported: {accepted:?}");
+    }
+
+    #[test]
+    fn second_root_element_is_rejected() {
+        // quick-xml accepts a second top-level element; a well-formed document has one root.
+        let content = format!(
+            r#"<office:document-content {NS_T}><office:body><office:text><text:p>Good</text:p></office:text></office:body></office:document-content><office:document-content {NS_T}><office:body/></office:document-content>"#
+        );
+        let err = import(&package(&content, None)).unwrap_err();
+        assert!(err.contains("not well-formed"), "{err}");
     }
 
     #[test]
